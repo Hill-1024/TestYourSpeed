@@ -1,10 +1,14 @@
 {
   "name": "llm-io-bench",
   "private": true,
+  "devDependencies": {
+    "wrangler": "^4.42.0"
+  },
   "scripts": {
     "kernel": "node scripts/build-kernel.mjs",
     "dev": "npm run kernel && npm run dev --prefix web",
     "build": "npm run kernel && npm install --prefix web && npm run build --prefix web",
-    "preview": "npm run preview --prefix web"
+    "preview": "npm run preview --prefix web",
+    "deploy": "wrangler deploy"
   }
 }
