@@ -1,5 +1,8 @@
 <p align="center">
-  <img src="docs/logo.svg" width="96" alt="TestYourSpeed">
+  <picture>
+    <source media="(prefers-color-scheme: dark)" srcset="docs/logo-dark.svg">
+    <img src="docs/logo.svg" width="96" alt="TestYourSpeed">
+  </picture>
 </p>
 
 <h1 align="center">TestYourSpeed</h1>
