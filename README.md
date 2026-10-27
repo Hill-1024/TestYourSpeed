@@ -1,4 +1,16 @@
-# 接口测速
+<p align="center">
+  <img src="docs/logo.svg" width="96" alt="TestYourSpeed">
+</p>
+
+<h1 align="center">TestYourSpeed</h1>
+
+<p align="center">
+  基于 WASM 的 LLM 测速工具。无状态，密钥不离开这台电脑。
+</p>
+
+<p align="center">
+  <a href="https://github.com/Hill-1024/TestYourSpeed">GitHub</a>
+</p>
 
 在浏览器里量一次对话补全：响应时间、首 token（TTFT）、输出速度。支持 OpenAI Chat Completions、OpenAI Responses，以及 Anthropic Messages。
 
