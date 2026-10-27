@@ -31,12 +31,26 @@ React 负责填写和展示。Rust 编成 WebAssembly，只做两件纯计算：
 
 有 `usage` 时用接口给的 completion token。没有时按文本估算，并在结果里标明。输出被 `length` 截断时也会标明。多次测量时，时间取中位数，速度取平均。
 
-## 本地
+## 本地网关测速
+
+需要测 `127.0.0.1`、`localhost` 等本地网关时，请 clone 本项目并在同一台电脑上运行：
+
+```bash
+git clone https://github.com/Hill-1024/TestYourSpeed.git
+cd TestYourSpeed
+```
+
+安装 [Rust](https://rustup.rs/) 和 Node.js 20+，然后：
 
 ```bash
 rustup target add wasm32-unknown-unknown
+npm install
 npm run dev
 ```
+
+打开终端里显示的本地地址（默认 `http://127.0.0.1:5173`）。开发服务器会把请求转发到你填写的本地网关，因此网关不需要额外配置 CORS。
+
+线上页面直连本地网关会受到浏览器的 CORS、混合内容和 Private Network Access 限制；WASM 无法绕过这些限制。不要把线上失败理解为 WASM 没有访问到本机。
 
 `npm run build` 的产物在 `web/dist/`。
 
