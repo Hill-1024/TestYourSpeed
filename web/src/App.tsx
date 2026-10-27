@@ -32,6 +32,7 @@ export function App() {
   const [modelsOpen, setModelsOpen] = useState(false);
   const [modelCursor, setModelCursor] = useState(0);
   const [modelsError, setModelsError] = useState<string | null>(null);
+  const [modelsLoading, setModelsLoading] = useState(false);
   const [phase, setPhase] = useState<ProbePhase | null>(null);
   const [busy, setBusy] = useState(false);
   const [live, setLive] = useState<Live | null>(null);
@@ -79,6 +80,7 @@ export function App() {
     setRevealed(true);
     setError(null);
     setSummary(null);
+    setLive({ text: "", run: 1, runs: count });
     const req: ProbeRequest = {
       api,
       endpoint,
@@ -112,6 +114,7 @@ export function App() {
     modelsRequest.current?.abort();
     const controller = new AbortController();
     modelsRequest.current = controller;
+    setModelsLoading(true);
     listModels(endpoint, modelsUrl, apiKey, api, controller.signal)
       .then((ids) => {
         if (controller.signal.aborted) return;
@@ -122,10 +125,22 @@ export function App() {
         if (controller.signal.aborted) return;
         setModels([]);
         setModelsError(err instanceof Error ? err.message : "拉不到模型列表");
+      })
+      .finally(() => {
+        if (!controller.signal.aborted) setModelsLoading(false);
       });
   }
 
   useEffect(() => () => modelsRequest.current?.abort(), []);
+
+  const modelBox = useRef<HTMLDivElement>(null);
+  useEffect(() => {
+    function closeMenu(event: PointerEvent) {
+      if (!modelBox.current?.contains(event.target as Node)) setModelsOpen(false);
+    }
+    document.addEventListener("pointerdown", closeMenu);
+    return () => document.removeEventListener("pointerdown", closeMenu);
+  }, []);
 
   return (
     <div className="page">
@@ -183,13 +198,19 @@ export function App() {
           <div className="split">
             <div className="field">
               <span>模型</span>
-              <div className="combo">
+              <div className="combo" ref={modelBox}>
                 <input
                   value={model}
                   spellCheck={false}
                   aria-label="模型"
+                  role="combobox"
+                  aria-autocomplete="list"
+                  aria-controls="model-menu"
                   aria-expanded={modelsOpen}
-                  aria-activedescendant={modelsOpen ? "model-active" : undefined}
+                  aria-activedescendant={modelsOpen && models.length ? "model-active" : undefined}
+                  onFocus={() => {
+                    if (models.length === 0 && !modelsError) loadModels();
+                  }}
                   onChange={(event) => {
                     setModel(event.target.value);
                     setModelCursor(0);
@@ -206,7 +227,7 @@ export function App() {
                       const step = event.key === "ArrowDown" ? 1 : -1;
                       setModelCursor((current) => (current + step + matched.length) % matched.length);
                     } else if ((event.key === "Enter" || event.key === "Tab") && modelsOpen && matched[modelCursor]) {
-                      event.preventDefault();
+                      if (event.key === "Enter") event.preventDefault();
                       setModel(matched[modelCursor]);
                       setModelsOpen(false);
                     } else if (event.key === "Escape") {
@@ -227,16 +248,19 @@ export function App() {
                   ▾
                 </button>
                 {modelsOpen && (
+                  <div className="menu-anchor">
                   <ModelMenu
                     models={models}
                     query={model}
                     cursor={modelCursor}
                     error={modelsError}
+                    loading={modelsLoading}
                     onPick={(id) => {
                       setModel(id);
                       setModelsOpen(false);
                     }}
                   />
+                  </div>
                 )}
               </div>
             </div>
@@ -257,7 +281,6 @@ export function App() {
               />
             </label>
           </div>
-          {modelsError && <p className="fail">{modelsError}</p>}
           <details className="advanced">
             <summary>高级设置</summary>
             <label className="field">
@@ -287,6 +310,7 @@ export function App() {
         {revealed && (
         <div className="readout" aria-live="polite">
           <Progress phase={phase} run={live?.run ?? 0} runs={live?.runs ?? 0} />
+          {busy && <p className="waiting">正在测速，结果会在这一轮结束后出现。</p>}
           <Figures summary={summary} />
           {live && live.text && (
             <details className="once" open>
@@ -359,19 +383,21 @@ function ModelMenu({
   query,
   cursor,
   error,
+  loading,
   onPick,
 }: {
   models: string[];
   query: string;
   cursor: number;
   error: string | null;
+  loading: boolean;
   onPick: (id: string) => void;
 }) {
   const matched = matchingModels(models, query);
   const active = Math.min(cursor, Math.max(matched.length - 1, 0));
   return (
-    <ul className="menu" role="listbox">
-      {models.length === 0 && <li className="quiet">{error ?? "正在拉取"}</li>}
+    <ul className="menu" role="listbox" id="model-menu">
+      {models.length === 0 && <li className="quiet">{loading ? "正在拉取" : error ?? "没有模型"}</li>}
       {models.length > 0 && matched.length === 0 && <li className="quiet">没有匹配的模型</li>}
       {matched.map((id, index) => (
         <li key={id} id={index === active ? "model-active" : undefined} role="option" aria-selected={index === active}>

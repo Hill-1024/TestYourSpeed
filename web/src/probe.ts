@@ -19,19 +19,23 @@ const encoder = new TextEncoder();
 
 export async function probeOnce(kernel: Kernel, req: ProbeRequest, signal: AbortSignal): Promise<{ report: Report; text: string }> {
   const url = requestUrl(req.api, req.endpoint);
+  mixedContentWarning(url);
   const payload = JSON.stringify(requestBody(req));
   const headers = requestHeaders(req);
-  const local = isLocalUrl(url);
+  // Production always talks directly to the URL in the form. In particular,
+  // 127.0.0.1 means the visitor's computer, not the Cloudflare machine.
+  // The Vite relay exists only to make local development convenient.
+  const relay = import.meta.env.DEV && isLocalUrl(url);
 
   const started = performance.now();
   req.onPhase?.("sent");
   let response: Response;
   try {
     req.onPhase?.("waiting");
-    response = await fetch(local ? "/probe" : url, {
+    response = await fetch(relay ? "/probe" : url, {
       method: "POST",
-      headers: local ? { "content-type": "application/json" } : headers,
-      body: local ? JSON.stringify({ url, headers, body: payload }) : payload,
+      headers: relay ? { "content-type": "application/json" } : headers,
+      body: relay ? JSON.stringify({ url, headers, body: payload }) : payload,
       signal,
     });
   } catch (err) {
@@ -143,6 +147,14 @@ function requestBody(req: ProbeRequest): Record<string, unknown> {
   };
 }
 
+function mixedContentWarning(value: string) {
+  if (!import.meta.env.PROD || window.location.protocol !== "https:") return;
+  const url = new URL(value);
+  if (url.protocol === "http:" && isLocalUrl(value)) {
+    throw new Error("当前页面是 HTTPS，浏览器会拦截它访问 HTTP 本地网关。请给网关启用 HTTPS，或在本地用 npm run dev 测。");
+  }
+}
+
 function isLocalUrl(value: string): boolean {
   try {
     const host = new URL(value).hostname;
@@ -167,11 +179,11 @@ export function modelsUrl(endpoint: string, override: string): string {
 export async function listModels(endpoint: string, override: string, apiKey: string, api: ApiKind, signal: AbortSignal): Promise<string[]> {
   const url = modelsUrl(endpoint, override);
   const headers = authHeaders(api, apiKey);
-  const local = isLocalUrl(url);
-  const response = await fetch(local ? "/probe" : url, {
-    method: local ? "POST" : "GET",
-    headers: local ? { "content-type": "application/json" } : headers,
-    body: local ? JSON.stringify({ url, method: "GET", headers }) : undefined,
+  const relay = import.meta.env.DEV && isLocalUrl(url);
+  const response = await fetch(relay ? "/probe" : url, {
+    method: relay ? "POST" : "GET",
+    headers: relay ? { "content-type": "application/json" } : headers,
+    body: relay ? JSON.stringify({ url, method: "GET", headers }) : undefined,
     signal,
   });
   if (!response.ok) {
@@ -245,7 +257,7 @@ function httpError(status: number, body: string): string {
 
 function corsHint(message: string): string {
   if (/failed to fetch|networkerror|load failed/i.test(message)) {
-    return "浏览器没有连上接口。本机地址请用 npm run dev 打开页面；线上页面只能请求允许跨域的接口。";
+    return "浏览器直接请求本地网关失败了。请确认网关已启用 CORS，允许当前页面跨域访问；请求不会经过 Cloudflare。";
   }
   return message;
 }
