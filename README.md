@@ -1,0 +1,34 @@
+# 接口测速
+
+在浏览器里量一次对话补全：响应时间、首 token（TTFT）、输出速度。支持 OpenAI Chat Completions、OpenAI Responses，以及 Anthropic Messages。
+
+React 负责填写和展示。Rust 编成 WebAssembly，只做两件纯计算：拆 SSE 帧，以及把时间戳算成指标。请求由页面直接发给你填的接口，没有自己的后端，构建结果可以挂到 Cloudflare Pages。
+
+## 指标
+
+| 数字 | 含义 |
+| --- | --- |
+| 首 token | 发出请求到第一段正文 |
+| 响应时间 | 发出请求到流结束 |
+| 输出速度 | 首 token 之后的 completion token / 秒 |
+| token 间隔 | 相邻输出 token 的平均间隔 |
+| 整段速度 | 全部输出 token / 整段响应时间 |
+
+有 `usage` 时用接口给的 completion token。没有时按文本估算，并在结果里标明。输出被 `length` 截断时也会标明。多次测量时，时间取中位数，速度取平均。
+
+## 本地
+
+```bash
+rustup target add wasm32-unknown-unknown
+npm run dev
+```
+
+`npm run build` 的产物在 `web/dist/`。
+
+## Cloudflare Pages
+
+构建命令 `npm run build`，输出目录 `web/dist`。默认构建镜像没有 Rust，命令前要先装 `wasm32-unknown-unknown`，见上一版说明里的 `rustup` 安装行。
+
+地址栏不会因切换协议而改写。发请求时，路径若已以 `/chat/completions`、`/responses` 或 `/messages` 结尾，就原样请求；否则按当前协议追加对应路径。
+
+接口必须允许这个页面所在源的跨域 `POST`。密钥只放在当次请求头里，不写入存储。
