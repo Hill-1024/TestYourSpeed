@@ -133,6 +133,7 @@ export function App() {
         <h1>Test Your Speed</h1>
         <p className="lede">
           基于 WASM 的 LLM 测速工具，无状态无需担心密钥泄露，一切跑在你的电脑上。
+          <a href="https://github.com/Hill-1024/TestYourSpeed">查看仓库</a>
         </p>
       </header>
 

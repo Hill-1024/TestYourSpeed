@@ -34,7 +34,8 @@ h1 {
   line-height: 0.95;
   letter-spacing: -0.03em;
 }
-.lede { margin: 16px auto 0; max-width: 38rem; color: var(--quiet); }
+.lede { margin: 16px auto 0; max-width: 42rem; color: var(--quiet); }
+.lede a { margin-left: 0.75em; color: var(--ink); }
 
 .bench {
   --form: 560px;
