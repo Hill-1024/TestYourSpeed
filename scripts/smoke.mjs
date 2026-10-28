@@ -72,4 +72,31 @@ const report = call(8000, (out, cap) => {
 });
 if (report.ttftMs !== 120) throw new Error("ttft " + report.ttftMs);
 if (Math.abs(report.tokensPerSec - 2.5) > 0.01) throw new Error("speed " + report.tokensPerSec);
-console.log(JSON.stringify({ text: fed.events[0].text, ttft: report.ttftMs, speed: report.tokensPerSec }));
+
+const cardInput = {
+  model: "gpt-test",
+  protocol: "Chat Completions",
+  runs: 2,
+  date: "2026-10-28",
+  ttftMs: 120,
+  totalMs: 540,
+  tokensPerSec: 50,
+  e2eTokensPerSec: 20,
+  itlMs: 20,
+  promptTokens: 4,
+  completionTokens: 10,
+  chars: 42,
+  estimated: false,
+  truncated: false,
+  windowShort: false,
+};
+const card = call(16000, (out, cap) => {
+  const input = enc.encode(JSON.stringify(cardInput));
+  return withBytes(input, (ptr) => exp.render_card(ptr, input.length, out, cap));
+});
+if (!card.svg.startsWith("<svg") || !card.svg.endsWith("</svg>")) throw new Error("card svg");
+if (!card.svg.includes("50.0 tok/s") || !card.svg.includes("2 次 · 时间取中位数")) throw new Error("card text");
+
+console.log(
+  JSON.stringify({ text: fed.events[0].text, ttft: report.ttftMs, speed: report.tokensPerSec, card: card.svg.length }),
+);

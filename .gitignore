@@ -1,6 +1,7 @@
 target/
 kernel/target/
 web/src/wasm/
+node_modules/
 web/node_modules/
 web/dist/
 web/tsconfig.tsbuildinfo

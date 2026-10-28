@@ -718,6 +718,15 @@ fn mean(values: &[f64]) -> Option<f64> {
     Some(values.iter().sum::<f64>() / values.len() as f64)
 }
 
+fn mean_count(values: impl Iterator<Item = Option<u32>>) -> Option<u32> {
+    let nums: Vec<u32> = values.flatten().collect();
+    if nums.is_empty() {
+        return None;
+    }
+    let sum: f64 = nums.iter().map(|n| f64::from(*n)).sum();
+    Some((sum / nums.len() as f64).round() as u32)
+}
+
 fn aggregate_runs(runs: Vec<Report>) -> Summary {
     let ok_runs: Vec<&Report> = runs.iter().filter(|run| run.ok).collect();
     if ok_runs.is_empty() {
@@ -773,8 +782,16 @@ fn aggregate_runs(runs: Vec<Report>) -> Summary {
         tokens_per_sec: mean(&speeds),
         e2e_tokens_per_sec: mean(&e2e),
         itl_ms: median(&mut itls),
-        prompt_tokens: if single { last.prompt_tokens } else { None },
-        completion_tokens: if single { last.completion_tokens } else { None },
+        prompt_tokens: if single {
+            last.prompt_tokens
+        } else {
+            mean_count(ok_runs.iter().map(|run| run.prompt_tokens))
+        },
+        completion_tokens: if single {
+            last.completion_tokens
+        } else {
+            mean_count(ok_runs.iter().map(|run| run.completion_tokens))
+        },
         estimated: ok_runs.iter().any(|run| run.estimated),
         truncated: ok_runs.iter().any(|run| run.truncated),
         window_short: ok_runs.iter().all(|run| run.window_short),
@@ -783,6 +800,226 @@ fn aggregate_runs(runs: Vec<Report>) -> Summary {
         chars: if single { last.chars } else { 0 },
         warning,
         runs,
+    }
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct CardInput {
+    model: String,
+    protocol: String,
+    runs: usize,
+    date: String,
+    ttft_ms: Option<f64>,
+    total_ms: Option<f64>,
+    tokens_per_sec: Option<f64>,
+    e2e_tokens_per_sec: Option<f64>,
+    itl_ms: Option<f64>,
+    prompt_tokens: Option<u32>,
+    completion_tokens: Option<u32>,
+    chars: usize,
+    estimated: bool,
+    truncated: bool,
+    window_short: bool,
+}
+
+#[derive(Serialize)]
+struct CardJson {
+    svg: String,
+}
+
+const CARD_FONT: &str = "JetBrains Mono, ui-monospace, SFMono-Regular, Menlo, monospace";
+const CARD_INK: &str = "#172033";
+const CARD_QUIET: &str = "#5c6b82";
+const CARD_RULE: &str = "#dde6f1";
+const CARD_PAPER: &str = "#f4f7fb";
+
+fn xml_escape(value: &str) -> String {
+    let mut out = String::with_capacity(value.len());
+    for ch in value.chars() {
+        match ch {
+            '&' => out.push_str("&amp;"),
+            '<' => out.push_str("&lt;"),
+            '>' => out.push_str("&gt;"),
+            '"' => out.push_str("&quot;"),
+            '\'' => out.push_str("&apos;"),
+            other => out.push(other),
+        }
+    }
+    out
+}
+
+fn clamp_chars(value: &str, max: usize) -> String {
+    let mut out: String = value.chars().take(max).collect();
+    if value.chars().count() > max {
+        out.pop();
+        out.push('…');
+    }
+    out
+}
+
+/// Mirrors `web/src/format.ts` so the card and the page show the same digits.
+fn card_ms(ms: Option<f64>) -> String {
+    match ms {
+        Some(ms) if ms.is_finite() && ms >= 0.0 => {
+            if ms < 1000.0 {
+                if ms < 10.0 {
+                    format!("{ms:.1} ms")
+                } else {
+                    format!("{ms:.0} ms")
+                }
+            } else {
+                format!("{:.2} s", ms / 1000.0)
+            }
+        }
+        _ => "—".to_string(),
+    }
+}
+
+fn card_speed(tokens: Option<f64>) -> String {
+    match tokens {
+        Some(tokens) if tokens.is_finite() && tokens > 0.0 => {
+            if tokens >= 100.0 {
+                format!("{tokens:.0} tok/s")
+            } else {
+                format!("{tokens:.1} tok/s")
+            }
+        }
+        _ => "—".to_string(),
+    }
+}
+
+fn card_count(value: Option<u32>) -> String {
+    value.map_or_else(|| "—".to_string(), |n| n.to_string())
+}
+
+fn card_line(x: f64, y: f64, size: f64, fill: &str, weight: &str, spacing: f64, anchor: &str, text: &str) -> String {
+    format!(
+        r#"<text x="{x}" y="{y}" font-family="{font}" font-size="{size}" font-weight="{weight}" letter-spacing="{spacing}" fill="{fill}" text-anchor="{anchor}">{text}</text>"#,
+        font = CARD_FONT,
+    )
+}
+
+/// Build the share card as SVG. Layout and typography live here so the page
+/// only has to rasterise it; nothing is uploaded anywhere.
+fn render_card_svg(card: &CardInput) -> String {
+    let model = xml_escape(&clamp_chars(card.model.trim(), 30));
+    let protocol = xml_escape(&clamp_chars(card.protocol.trim(), 18));
+    let date = xml_escape(&clamp_chars(card.date.trim(), 24));
+    let runs = if card.runs > 1 {
+        format!("{} 次 · 时间取中位数", card.runs)
+    } else {
+        "单次测量".to_string()
+    };
+    let mut notes = Vec::new();
+    if card.estimated {
+        notes.push("输出 token 为估算");
+    }
+    if card.truncated {
+        notes.push("输出被截断");
+    }
+    if card.window_short {
+        notes.push("输出太短");
+    }
+    let meta = if notes.is_empty() {
+        format!("{protocol} · {runs}")
+    } else {
+        format!("{protocol} · {runs} · {}", notes.join(" · "))
+    };
+
+    let mut svg = String::with_capacity(4096);
+    svg.push_str(r##"<svg xmlns="http://www.w3.org/2000/svg" width="1200" height="630" viewBox="0 0 1200 630" role="img">"##);
+    svg.push_str(&format!(
+        r##"<rect width="1200" height="630" fill="{CARD_PAPER}"/><rect x="28" y="28" width="1144" height="574" rx="24" fill="#ffffff" stroke="#e3eaf3"/>"##,
+        CARD_PAPER = CARD_PAPER,
+    ));
+    svg.push_str(&format!(
+        r##"<rect x="76" y="97" width="12" height="12" rx="3" fill="{CARD_INK}"/>"##,
+        CARD_INK = CARD_INK,
+    ));
+    svg.push_str(&card_line(100.0, 109.0, 15.0, CARD_QUIET, "500", 3.5, "start", "TEST YOUR SPEED"));
+    svg.push_str(&card_line(1124.0, 109.0, 15.0, CARD_QUIET, "400", 0.0, "end", &date));
+    svg.push_str(&card_line(76.0, 202.0, 46.0, CARD_INK, "500", -0.5, "start", &model));
+    svg.push_str(&card_line(76.0, 240.0, 18.0, CARD_QUIET, "400", 0.0, "start", &meta));
+    svg.push_str(&format!(
+        r##"<line x1="76" y1="282" x2="1124" y2="282" stroke="{CARD_RULE}"/>"##,
+        CARD_RULE = CARD_RULE,
+    ));
+
+    svg.push_str(&card_line(76.0, 342.0, 16.0, CARD_QUIET, "400", 1.0, "start", "首 token"));
+    svg.push_str(&card_line(76.0, 448.0, 104.0, CARD_INK, "500", -3.0, "start", &card_ms(card.ttft_ms)));
+
+    let cells = [
+        (660.0, 342.0, "响应时间", card_ms(card.total_ms)),
+        (916.0, 342.0, "输出速度", card_speed(card.tokens_per_sec)),
+        (660.0, 424.0, "整段速度", card_speed(card.e2e_tokens_per_sec)),
+        (916.0, 424.0, "token 间隔", card_ms(card.itl_ms)),
+    ];
+    for (x, y, label, value) in cells {
+        svg.push_str(&card_line(x, y, 16.0, CARD_QUIET, "400", 1.0, "start", label));
+        svg.push_str(&card_line(x, y + 44.0, 36.0, CARD_INK, "500", -0.5, "start", &value));
+    }
+
+    svg.push_str(&format!(
+        r##"<line x1="76" y1="496" x2="1124" y2="496" stroke="{CARD_RULE}"/>"##,
+        CARD_RULE = CARD_RULE,
+    ));
+
+    let mut stats = vec![
+        (76.0, "输入 token", card_count(card.prompt_tokens)),
+        (500.0, "输出 token", card_count(card.completion_tokens)),
+    ];
+    if card.chars > 0 {
+        stats.push((924.0, "输出字符", card.chars.to_string()));
+    }
+    for (x, label, value) in stats {
+        let body = format!(
+            r##"<tspan fill="{quiet}">{label}</tspan><tspan fill="{ink}" dx="12">{value}</tspan>"##,
+            quiet = CARD_QUIET,
+            ink = CARD_INK,
+        );
+        svg.push_str(&card_line(x, 552.0, 20.0, CARD_INK, "400", 0.0, "start", &body));
+    }
+
+    svg.push_str(&card_line(
+        76.0,
+        584.0,
+        13.0,
+        CARD_QUIET,
+        "400",
+        0.0,
+        "start",
+        "TestYourSpeed · on WASM",
+    ));
+    svg.push_str(&card_line(
+        1124.0,
+        584.0,
+        13.0,
+        CARD_QUIET,
+        "400",
+        0.0,
+        "end",
+        "github.com/Hill-1024/TestYourSpeed",
+    ));
+    svg.push_str("</svg>");
+    svg
+}
+
+#[unsafe(no_mangle)]
+pub extern "C" fn render_card(input_ptr: *const u8, input_len: usize, out_ptr: *mut u8, out_cap: usize) -> i32 {
+    let parsed = (|| {
+        let bytes = read_bytes(input_ptr, input_len)?;
+        serde_json::from_slice::<CardInput>(bytes).map_err(|_| "卡片数据无法解析".to_string())
+    })();
+    match parsed {
+        Ok(card) => json_out(
+            &CardJson {
+                svg: render_card_svg(&card),
+            },
+            out_ptr,
+            out_cap,
+        ),
+        Err(error) => set_error(error),
     }
 }
 
@@ -1114,5 +1351,91 @@ mod tests {
         let report = summarize_spec(spec);
         assert!(report.truncated);
         assert!(report.ok);
+    }
+
+    #[test]
+    fn averages_tokens_across_runs() {
+        let make = |tokens: u32| Report {
+            ok: true,
+            error: None,
+            warning: None,
+            ttft_ms: Some(100.0),
+            total_ms: 500.0,
+            ttfb_ms: 40.0,
+            t_last_ms: Some(480.0),
+            tokens_per_sec: Some(50.0),
+            e2e_tokens_per_sec: Some(20.0),
+            itl_ms: Some(20.0),
+            prompt_tokens: Some(10),
+            completion_tokens: Some(tokens),
+            estimated: false,
+            truncated: false,
+            window_short: false,
+            request_bytes: 10,
+            response_bytes: 100,
+            chars: 20,
+        };
+        let summary = aggregate_runs(vec![make(10), make(21)]);
+        assert!(summary.ok);
+        assert_eq!(summary.prompt_tokens, Some(10));
+        assert_eq!(summary.completion_tokens, Some(16)); // (10 + 21) / 2 = 15.5 -> 16
+    }
+
+    fn card() -> CardInput {
+        CardInput {
+            model: "gpt-5-mini".into(),
+            protocol: "Chat Completions".into(),
+            runs: 3,
+            date: "2026-10-28".into(),
+            ttft_ms: Some(842.4),
+            total_ms: Some(3020.0),
+            tokens_per_sec: Some(84.2),
+            e2e_tokens_per_sec: Some(31.4),
+            itl_ms: Some(11.9),
+            prompt_tokens: Some(24),
+            completion_tokens: Some(312),
+            chars: 1280,
+            estimated: false,
+            truncated: false,
+            window_short: false,
+        }
+    }
+
+    #[test]
+    fn card_lays_out_the_metrics() {
+        let svg = render_card_svg(&card());
+        assert!(svg.starts_with("<svg"));
+        assert!(svg.ends_with("</svg>"));
+        assert!(svg.contains("gpt-5-mini"));
+        assert!(svg.contains("3 次 · 时间取中位数"));
+        assert!(svg.contains(">842 ms<"));
+        assert!(svg.contains(">3.02 s<"));
+        assert!(svg.contains(">84.2 tok/s<"));
+        assert!(svg.contains(">312<"));
+    }
+
+    #[test]
+    fn card_escapes_text_and_marks_estimates() {
+        let mut input = card();
+        input.model = "a<b>&\"c".into();
+        input.estimated = true;
+        input.truncated = true;
+        input.chars = 0;
+        input.prompt_tokens = None;
+        let svg = render_card_svg(&input);
+        assert!(svg.contains("a&lt;b&gt;&amp;&quot;c"));
+        assert!(!svg.contains("a<b>"));
+        assert!(svg.contains("输出 token 为估算 · 输出被截断"));
+        assert!(svg.contains(">—<"));
+        assert!(!svg.contains("输出字符"));
+    }
+
+    #[test]
+    fn card_truncates_long_model_names() {
+        let mut input = card();
+        input.model = "x".repeat(40);
+        let svg = render_card_svg(&input);
+        assert!(svg.contains(&format!("{}…", "x".repeat(29))));
+        assert!(!svg.contains(&"x".repeat(31)));
     }
 }

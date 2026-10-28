@@ -29,7 +29,13 @@ React 负责填写和展示。Rust 编成 WebAssembly，只做两件纯计算：
 | token 间隔 | 相邻输出 token 的平均间隔 |
 | 整段速度 | 全部输出 token / 整段响应时间 |
 
-有 `usage` 时用接口给的 completion token。没有时按文本估算，并在结果里标明。输出被 `length` 截断时也会标明。多次测量时，时间取中位数，速度取平均。
+有 `usage` 时用接口给的 completion token。没有时按文本估算，并在结果里标明。输出被 `length` 截断时也会标明。多次测量时，时间取中位数，速度取平均，token 数取平均。
+
+## 导出
+
+结果可以复制成 JSON、下载 CSV，或生成 1200×630 的 PNG 卡片：点「导出图片」先弹出预览，再选择保存或关闭。卡片由 WASM 内核排版成 SVG，再交给这台机器的浏览器画布栅格化，全程不上传任何数据。
+
+如果接口拒绝了 `max_tokens` 或 `temperature`（新版 OpenAI 推理模型常见），页面会自动换用 `max_completion_tokens` 或省去 `temperature` 重试一次，并在结果下面注明改了什么。
 
 ## 本地网关测速
 
@@ -54,9 +60,25 @@ npm run dev
 
 `npm run build` 的产物在 `web/dist/`。
 
+## 测试
+
+```bash
+npm test
+```
+
+会先编译 WASM，再跑内核的 C ABI 冒烟测试和前端的单元测试。也可以分开跑：`cargo test --manifest-path kernel/Cargo.toml`、`node scripts/smoke.mjs`、`npm test --prefix web`。
+
 ## Cloudflare Pages
 
-构建命令 `npm run build`，输出目录 `web/dist`。默认构建镜像没有 Rust，命令前要先装 `wasm32-unknown-unknown`，见上一版说明里的 `rustup` 安装行。
+构建命令（默认构建镜像没有 Rust，先装一个最小工具链）：
+
+```bash
+curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh -s -- -y --profile minimal --target wasm32-unknown-unknown
+. "$HOME/.cargo/env"
+npm run build
+```
+
+输出目录填 `web/dist`。
 
 地址栏不会因切换协议而改写。发请求时，路径若已以 `/chat/completions`、`/responses` 或 `/messages` 结尾，就原样请求；否则按当前协议追加对应路径。
 

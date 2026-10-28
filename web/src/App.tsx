@@ -2,6 +2,8 @@ import { useEffect, useRef, useState } from "react";
 import { loadKernel, type Kernel, type Report, type Summary } from "./kernel";
 import { listModels, probeOnce, type ApiKind, type ProbePhase, type ProbeRequest } from "./probe";
 import { formatCount, formatMs, formatSpeed } from "./format";
+import { cardPng, download, filename, toCsv, toJson, type ExportMeta } from "./export";
+import { CardDialog, type CardState } from "./CardDialog";
 
 const APIS: { id: ApiKind; label: string }[] = [
   { id: "chat", label: "Chat Completions" },
@@ -27,6 +29,7 @@ export function App() {
   const [prompt, setPrompt] = useState(DEFAULT_PROMPT);
   const [maxTokens, setMaxTokens] = useState("256");
   const [runs, setRuns] = useState("1");
+  const [timeoutText, setTimeoutText] = useState("60");
   const [modelsUrl, setModelsUrl] = useState("");
   const [models, setModels] = useState<string[]>([]);
   const [modelsOpen, setModelsOpen] = useState(false);
@@ -37,9 +40,14 @@ export function App() {
   const [busy, setBusy] = useState(false);
   const [live, setLive] = useState<Live | null>(null);
   const [summary, setSummary] = useState<Summary | null>(null);
+  const [summaryMeta, setSummaryMeta] = useState<ExportMeta | null>(null);
+  const [adaptations, setAdaptations] = useState<string[]>([]);
+  const [exportNote, setExportNote] = useState<string | null>(null);
+  const [card, setCard] = useState<CardState | null>(null);
   const [error, setError] = useState<string | null>(null);
   const [revealed, setRevealed] = useState(false);
   const modelsRequest = useRef<AbortController | null>(null);
+  const runRequest = useRef<AbortController | null>(null);
 
   useEffect(() => {
     let cancelled = false;
@@ -59,12 +67,21 @@ export function App() {
     if (!kernel || busy) return;
     const count = wholeNumber(runs);
     const tokens = wholeNumber(maxTokens);
+    const seconds = wholeNumber(timeoutText);
     if (count === null || count < 1) {
       setError("次数要是大于 0 的整数");
       return;
     }
     if (tokens === null || tokens < 1) {
       setError("最多 token 要是大于 0 的整数");
+      return;
+    }
+    if (seconds === null) {
+      setError("超时要是大于 0 的整数（秒）");
+      return;
+    }
+    if (!endpoint.trim()) {
+      setError("先填写接口地址");
       return;
     }
     if (!model.trim()) {
@@ -75,11 +92,27 @@ export function App() {
       setError("先填写提示词");
       return;
     }
+    const meta: ExportMeta = {
+      model: model.trim(),
+      protocol: APIS.find((item) => item.id === api)?.label ?? api,
+      date: new Date().toISOString().slice(0, 10),
+    };
+    const abort = new AbortController();
+    runRequest.current = abort;
+    let timedOut = false;
+    const timer = window.setTimeout(() => {
+      timedOut = true;
+      abort.abort();
+    }, seconds * 1000);
     setBusy(true);
     setPhase("sent");
     setRevealed(true);
+    setModelsOpen(false);
     setError(null);
     setSummary(null);
+    setSummaryMeta(null);
+    setAdaptations([]);
+    setExportNote(null);
     setLive({ text: "", run: 1, runs: count });
     const req: ProbeRequest = {
       api,
@@ -92,23 +125,95 @@ export function App() {
       onPhase: setPhase,
     };
     const reports: Report[] = [];
-    const controller = new AbortController();
+    const commit = (list: Report[]) => {
+      if (!list.length) return;
+      setSummary(kernel.aggregate(list));
+      setSummaryMeta(meta);
+    };
     try {
       for (let index = 0; index < count; index++) {
+        if (abort.signal.aborted) break;
         setLive({ text: "", run: index + 1, runs: count });
-        const { report, text } = await probeOnce(kernel, req, controller.signal);
+        const { report, text, adaptations: said } = await probeOnce(kernel, req, abort.signal);
         reports.push(report);
         setLive({ text, run: index + 1, runs: count });
+        if (said.length) setAdaptations((current) => [...new Set([...current, ...said])]);
         if (!report.ok && count === 1) break;
+        if (abort.signal.aborted) break;
         if (index < count - 1) await wait(700);
       }
-      setSummary(kernel.aggregate(reports));
+      commit(reports);
     } catch (err) {
-      setError(err instanceof Error ? err.message : "测速失败");
+      commit(reports);
+      if (abort.signal.aborted) {
+        setError(timedOut ? `超过 ${seconds} 秒还没结束，已经停下。` : "已取消。");
+      } else {
+        setError(err instanceof Error ? err.message : "测速失败");
+      }
     } finally {
+      window.clearTimeout(timer);
+      runRequest.current = null;
       setBusy(false);
     }
   }
+
+  useEffect(() => {
+    if (!exportNote) return;
+    const timer = window.setTimeout(() => setExportNote(null), 3200);
+    return () => window.clearTimeout(timer);
+  }, [exportNote]);
+
+  async function copyJson() {
+    if (!summary || !summaryMeta) return;
+    const text = toJson(summary, summaryMeta);
+    try {
+      await navigator.clipboard.writeText(text);
+      setExportNote("JSON 已复制");
+    } catch {
+      download(new Blob([text], { type: "application/json" }), filename(summaryMeta, "json"));
+      setExportNote("剪贴板不可用，已改为下载");
+    }
+  }
+
+  function saveCsv() {
+    if (!summary || !summaryMeta) return;
+    download(new Blob([toCsv(summary, summaryMeta)], { type: "text/csv;charset=utf-8" }), filename(summaryMeta, "csv"));
+    setExportNote("CSV 已保存");
+  }
+
+  async function saveCard() {
+    if (!kernel || !summary || !summaryMeta) return;
+    setCard({ status: "loading" });
+    try {
+      const blob = await cardPng(kernel, summary, summaryMeta);
+      setCard({
+        status: "ready",
+        url: URL.createObjectURL(blob),
+        blob,
+        name: filename(summaryMeta, "png"),
+      });
+    } catch (err) {
+      setCard({ status: "error", message: err instanceof Error ? err.message : "图片没能生成" });
+    }
+  }
+
+  function closeCard() {
+    setCard(null);
+  }
+
+  function keepCard() {
+    if (card?.status !== "ready") return;
+    download(card.blob, card.name);
+    setExportNote("卡片已保存");
+    setCard(null);
+  }
+
+  useEffect(() => {
+    const url = card?.status === "ready" ? card.url : null;
+    return () => {
+      if (url) URL.revokeObjectURL(url);
+    };
+  }, [card]);
 
   function loadModels() {
     modelsRequest.current?.abort();
@@ -131,7 +236,13 @@ export function App() {
       });
   }
 
-  useEffect(() => () => modelsRequest.current?.abort(), []);
+  useEffect(
+    () => () => {
+      modelsRequest.current?.abort();
+      runRequest.current?.abort();
+    },
+    [],
+  );
 
   const modelBox = useRef<HTMLDivElement>(null);
   useEffect(() => {
@@ -283,22 +394,37 @@ export function App() {
           </div>
           <details className="advanced">
             <summary>高级设置</summary>
-            <label className="field">
-              <span>模型列表地址</span>
-              <input
-                value={modelsUrl}
-                autoComplete="off"
-                spellCheck={false}
-                placeholder="留空则请求 /models"
-                onChange={(event) => setModelsUrl(event.target.value)}
-              />
-            </label>
+            <div className="adv-grid">
+              <label className="field">
+                <span>模型列表地址</span>
+                <input
+                  value={modelsUrl}
+                  autoComplete="off"
+                  spellCheck={false}
+                  placeholder="留空则请求 /models"
+                  onChange={(event) => setModelsUrl(event.target.value)}
+                />
+              </label>
+              <label className="field">
+                <span>超时（秒）</span>
+                <input
+                  inputMode="numeric"
+                  value={timeoutText}
+                  onChange={(event) => setTimeoutText(event.target.value)}
+                />
+              </label>
+            </div>
           </details>
           <label className="field">
             <span>提示词</span>
             <textarea value={prompt} onChange={(event) => setPrompt(event.target.value)} />
           </label>
           <div className="run">
+            {busy && (
+              <button className="stop" type="button" onClick={() => runRequest.current?.abort()}>
+                停止
+              </button>
+            )}
             <button className="go" type="submit" disabled={!kernel || busy}>
               {busy ? "正在测…" : kernel ? "开始测速" : "内核加载中"}
             </button>
@@ -312,6 +438,21 @@ export function App() {
           <Progress phase={phase} run={live?.run ?? 0} runs={live?.runs ?? 0} />
           {busy && <p className="waiting">正在测速，结果会在这一轮结束后出现。</p>}
           <Figures summary={summary} />
+          {summary?.ok && (
+            <div className="exports">
+              <button type="button" onClick={() => void copyJson()}>
+                复制 JSON
+              </button>
+              <button type="button" onClick={saveCsv}>
+                下载 CSV
+              </button>
+              <button type="button" onClick={() => void saveCard()}>
+                导出图片
+              </button>
+              {exportNote && <span className="export-note">{exportNote}</span>}
+            </div>
+          )}
+          <Notes summary={summary} adaptations={adaptations} />
           {live && live.text && (
             <details className="once" open>
               <summary>
@@ -326,9 +467,11 @@ export function App() {
 
       <footer>
         <p>
-          首 token 从发出请求算到第一段正文。输出速度只算这之后的间隔，用接口返回的 completion token；没有 usage 时按文本估算，并标明。多次测量取中位数，速度取平均。
+          首 token 从发出请求算到第一段正文。输出速度只算这之后的间隔，用接口返回的 completion token；没有 usage 时按文本估算，并标明。多次测量时，时间取中位数，速度和 token 数取平均。
         </p>
       </footer>
+
+      {card && <CardDialog state={card} onSave={keepCard} onClose={closeCard} />}
     </div>
   );
 }
@@ -336,7 +479,7 @@ export function App() {
 const PHASES: { id: ProbePhase; label: string }[] = [
   { id: "sent", label: "发出" },
   { id: "waiting", label: "等待响应" },
-  { id: "streaming", label: "开始响应" },
+  { id: "streaming", label: "首 token" },
   { id: "done", label: "响应结束" },
 ];
 
@@ -437,6 +580,10 @@ function Figures({ summary }: { summary: Summary | null }) {
           <dd>{formatMs(summary.totalMs)}</dd>
         </div>
         <div>
+          <dt>响应头</dt>
+          <dd>{formatMs(summary.ttfbMs)}</dd>
+        </div>
+        <div>
           <dt>输出速度</dt>
           <dd>{formatSpeed(summary.tokensPerSec)}</dd>
         </div>
@@ -457,7 +604,6 @@ function Figures({ summary }: { summary: Summary | null }) {
           <dd>{formatCount(summary.completionTokens)}</dd>
         </div>
       </dl>
-      <Notes summary={summary} />
       {summary.runs.length > 1 && (
         <ol className="runs">
           {summary.runs.map((run, index) => (
@@ -473,13 +619,14 @@ function Figures({ summary }: { summary: Summary | null }) {
   );
 }
 
-function Notes({ summary }: { summary: Summary }) {
+function Notes({ summary, adaptations }: { summary: Summary | null; adaptations: string[] }) {
   const notes: string[] = [];
-  if (summary.estimated) notes.push("接口没有返回用量，输出 token 是按文本估算的");
-  if (summary.windowShort) notes.push("输出太短，速度含首 token，不能单独看生成");
-  if (summary.truncated) notes.push("输出被长度上限截断");
-  if (summary.warning) notes.push(summary.warning);
-  if (summary.runs.length > 1) notes.push(`${summary.runs.length} 次，时间取中位数`);
+  if (summary?.estimated) notes.push("接口没有返回用量，输出 token 是按文本估算的");
+  if (summary?.windowShort) notes.push("输出太短，速度含首 token，不能单独看生成");
+  if (summary?.truncated) notes.push("输出被长度上限截断");
+  if (summary?.warning) notes.push(summary.warning);
+  if (summary && summary.runs.length > 1) notes.push(`${summary.runs.length} 次，时间取中位数，token 数取平均`);
+  notes.push(...adaptations);
   if (!notes.length) return null;
   return (
     <ul className="notes">

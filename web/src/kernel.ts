@@ -66,7 +66,26 @@ export type Summary = {
   runs: Report[];
 };
 
+export type CardInput = {
+  model: string;
+  protocol: string;
+  runs: number;
+  date: string;
+  ttftMs: number | null;
+  totalMs: number | null;
+  tokensPerSec: number | null;
+  e2eTokensPerSec: number | null;
+  itlMs: number | null;
+  promptTokens: number | null;
+  completionTokens: number | null;
+  chars: number;
+  estimated: boolean;
+  truncated: boolean;
+  windowShort: boolean;
+};
+
 type FeedJson = { carryB64: string; events: StreamEvent[] };
+type CardJson = { svg: string };
 
 type Exports = {
   memory: WebAssembly.Memory;
@@ -92,6 +111,7 @@ type Exports = {
   parse_unary: (bodyPtr: number, bodyLen: number, outPtr: number, outCap: number) => number;
   summarize: (specPtr: number, specLen: number, outPtr: number, outCap: number) => number;
   aggregate: (runsPtr: number, runsLen: number, outPtr: number, outCap: number) => number;
+  render_card: (inputPtr: number, inputLen: number, outPtr: number, outCap: number) => number;
 };
 
 export type Kernel = {
@@ -110,6 +130,7 @@ export type Kernel = {
     ticks: Tick[];
   }) => Report;
   aggregate: (runs: Report[]) => Summary;
+  renderCard: (input: CardInput) => string;
 };
 
 const encoder = new TextEncoder();
@@ -238,6 +259,14 @@ function bind(exp: Exports): Kernel {
       return invoke(guess, (outPtr, cap) =>
         withBytes(bytes, (ptr) => exp.aggregate(ptr, bytes.length, outPtr, cap)),
       );
+    },
+    renderCard(input) {
+      const bytes = encoder.encode(JSON.stringify(input));
+      const guess = Math.max(65536, bytes.length + 8192);
+      const { svg } = invoke<CardJson>(guess, (outPtr, cap) =>
+        withBytes(bytes, (ptr) => exp.render_card(ptr, bytes.length, outPtr, cap)),
+      );
+      return svg;
     },
   };
 }

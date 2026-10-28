@@ -8,6 +8,7 @@
     "kernel": "node scripts/build-kernel.mjs",
     "dev": "npm run kernel && npm run dev --prefix web",
     "build": "npm run kernel && npm install --prefix web && npm run build --prefix web",
+    "test": "npm run kernel && node scripts/smoke.mjs && npm test --prefix web",
     "preview": "npm run preview --prefix web",
     "deploy": "wrangler deploy"
   }
