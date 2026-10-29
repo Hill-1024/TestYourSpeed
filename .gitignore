@@ -5,4 +5,5 @@ node_modules/
 web/node_modules/
 web/dist/
 web/tsconfig.tsbuildinfo
+.wrangler/
 .DS_Store

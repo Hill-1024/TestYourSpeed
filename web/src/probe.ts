@@ -12,6 +12,8 @@ export type ProbeRequest = {
   prompt: string;
   maxTokens: number;
   temperature: number;
+  /** Send through /api/relay when the endpoint cannot answer preflight. */
+  relay?: boolean;
   onPhase?: (phase: ProbePhase) => void;
 };
 
@@ -25,15 +27,28 @@ const BASE_OPTIONS: PayloadOptions = { temperature: true, maxTokensField: "max_t
 
 export type ProbeResult = { report: Report; text: string; adaptations: string[] };
 
+/** A transport failure, as opposed to an HTTP error the endpoint returned. */
+export class NetworkFailure extends Error {
+  readonly retryable: boolean;
+
+  constructor(message: string, retryable: boolean) {
+    super(message);
+    this.name = "NetworkFailure";
+    this.retryable = retryable;
+  }
+}
+
 const encoder = new TextEncoder();
 
 export async function probeOnce(kernel: Kernel, req: ProbeRequest, signal: AbortSignal): Promise<ProbeResult> {
   const url = requestUrl(req.api, req.endpoint);
-  mixedContentWarning(url);
+  guardEndpoint(new URL(url));
   // Production always talks directly to the URL in the form. In particular,
   // 127.0.0.1 means the visitor's computer, not the Cloudflare machine.
-  // The Vite relay exists only to make local development convenient.
-  const relay = import.meta.env.DEV && isLocalUrl(url);
+  // In development every request goes through the Vite relay; in production
+  // the person can opt into the same relay at /api/relay.
+  const relay = import.meta.env.DEV || req.relay === true;
+  const relayPath = import.meta.env.DEV ? "/probe" : "/api/relay";
   const headers = requestHeaders(req);
   const adaptations: string[] = [];
   let options = { ...BASE_OPTIONS };
@@ -42,19 +57,28 @@ export async function probeOnce(kernel: Kernel, req: ProbeRequest, signal: Abort
     const payload = JSON.stringify(requestBody(req, options));
     const started = performance.now();
     req.onPhase?.("sent");
-    let response: Response;
-    try {
-      req.onPhase?.("waiting");
-      response = await fetch(relay ? "/probe" : url, {
+    const send = () =>
+      fetch(relay ? relayPath : url, {
         method: "POST",
         headers: relay ? { "content-type": "application/json" } : headers,
         body: relay ? JSON.stringify({ url, headers, body: payload }) : payload,
         signal,
       });
+    let response: Response;
+    try {
+      req.onPhase?.("waiting");
+      response = await send();
     } catch (err) {
       if (signal.aborted) throw new Error("已取消");
-      const message = err instanceof Error ? err.message : "请求失败";
-      throw new Error(corsHint(message));
+      // One cheap retry: transient DNS/TLS/socket hiccups clear up, real CORS
+      // failures just fail again with a clearer message.
+      await sleep(350);
+      if (signal.aborted) throw new Error("已取消");
+      try {
+        response = await send();
+      } catch (second) {
+        throw new NetworkFailure(fetchFailure(second, new URL(url)), false);
+      }
     }
 
     // Newer OpenAI models reject `max_tokens` and reasoning models reject
@@ -119,6 +143,14 @@ export async function probeOnce(kernel: Kernel, req: ProbeRequest, signal: Abort
         carry = fed.carry;
         absorb(fed.events, from, value.byteLength);
       }
+    } catch (err) {
+      await reader.cancel().catch(() => {});
+      if (signal.aborted) throw new Error("已取消");
+      const raw = err instanceof Error && err.message ? err.message : "连接被重置";
+      throw new NetworkFailure(
+        `输出传到一半连接断了，已经收到 ${received} 字节。重跑一次可以重新计费；如果经常断，检查接口是否限制了单次响应时长或连接数。原始信息：${raw}`,
+        false,
+      );
     } finally {
       reader.releaseLock();
     }
@@ -216,20 +248,97 @@ export function requestBody(req: ProbeRequest, options: PayloadOptions = BASE_OP
   };
 }
 
-function mixedContentWarning(value: string) {
-  if (!import.meta.env.PROD || window.location.protocol !== "https:") return;
-  const url = new URL(value);
-  if (url.protocol === "http:" && isLocalUrl(value)) {
+/**
+ * Browsers refuse to mix: an HTTPS page cannot call an HTTP endpoint unless
+ * the endpoint is loopback. Say so before the request dies as "Failed to fetch".
+ */
+function guardEndpoint(url: URL) {
+  if (url.protocol !== "http:" || window.location.protocol !== "https:") return;
+  if (isLocalUrl(url.toString())) {
     throw new Error("当前页面是 HTTPS，浏览器会拦截它访问 HTTP 本地网关。请给网关启用 HTTPS，或在本地用 npm run dev 测。");
   }
+  throw new Error(
+    `当前页面是 HTTPS，浏览器会拦截到 HTTP 接口 ${url.host} 的请求。请把接口换成 https（或在本地用 npm run dev 测）。`,
+  );
 }
 
-function isLocalUrl(value: string): boolean {
+export function isLocalUrl(value: string): boolean {
   try {
     const host = new URL(value).hostname;
     return host === "localhost" || host === "127.0.0.1" || host === "::1";
   } catch {
     return false;
+  }
+}
+
+export function isPrivateHost(host: string): boolean {
+  const name = host.replace(/^\[|\]$/g, "").toLowerCase();
+  if (name === "localhost" || name === "::1" || name.endsWith(".local") || name.endsWith(".internal")) return true;
+  if (/^127\./.test(name) || /^10\./.test(name) || /^192\.168\./.test(name) || /^169\.254\./.test(name)) return true;
+  return /^172\.(1[6-9]|2\d|3[01])\./.test(name);
+}
+
+/** Turn an opaque TypeError into something the person can act on. */
+function fetchFailure(err: unknown, url: URL): string {
+  const raw = err instanceof Error && err.message ? err.message : "Failed to fetch";
+  const reasons: string[] = [];
+  if (typeof navigator !== "undefined" && navigator.onLine === false) {
+    reasons.push("这台机器现在没有联网");
+  } else if (isPrivateHost(url.hostname) && window.location.protocol === "https:") {
+    reasons.push("页面在公网、接口在局域网，Chrome 的 Private Network Access 会先拦截");
+  } else if (typeof window !== "undefined" && window.location.protocol === "https:" && url.protocol === "http:") {
+    reasons.push("页面是 HTTPS，浏览器会拦截到 HTTP 接口的请求");
+  } else {
+    reasons.push("接口没有允许当前站点跨域（CORS 预检没通过）");
+    reasons.push("地址、DNS 或证书不可达");
+  }
+  return `浏览器没拿到响应：${reasons.join("；")}。原始信息：${raw}`;
+}
+
+function sleep(ms: number): Promise<void> {
+  return new Promise((resolve) => window.setTimeout(resolve, ms));
+}
+
+export type Reachability = { ok: boolean; detail: string };
+
+/**
+ * A HEAD request without CORS tells us whether the host answers at all.
+ * If it does, the failure is about CORS or headers, not the network.
+ */
+export async function probeReachability(
+  api: ApiKind,
+  endpoint: string,
+  signal: AbortSignal,
+  relayMode = false,
+): Promise<Reachability> {
+  const url = new URL(requestUrl(api, endpoint));
+  guardEndpoint(url);
+  const viaWorker = relayMode && !import.meta.env.DEV;
+  try {
+    if (viaWorker) {
+      const response = await fetch("/api/relay", {
+        method: "POST",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify({ url: url.toString(), method: "HEAD", headers: {} }),
+        signal,
+      });
+      if (response.headers.get("x-relay-error")) {
+        const detail = await response.text().catch(() => "");
+        return { ok: false, detail: `中继没能转发：${detail.replace(/\s+/g, " ").slice(0, 160)}` };
+      }
+      return {
+        ok: true,
+        detail: `中继可以访问 ${url.host}。如果测速仍然失败，检查密钥、模型名，或接口是否限制了流式输出。`,
+      };
+    }
+    await fetch(url.toString(), { method: "HEAD", mode: "no-cors", cache: "no-store", signal });
+    return {
+      ok: true,
+      detail: `${url.host} 可达。如果测速仍然失败，问题在跨域（CORS）：接口需要允许当前站点的 OPTIONS 预检，并放行 authorization、content-type 等请求头。也可以勾选「使用中继转发」。`,
+    };
+  } catch (err) {
+    if (signal.aborted) throw new Error("已取消");
+    return { ok: false, detail: fetchFailure(err, url) };
   }
 }
 
@@ -245,11 +354,18 @@ export function modelsUrl(endpoint: string, override: string): string {
   return base.toString();
 }
 
-export async function listModels(endpoint: string, override: string, apiKey: string, api: ApiKind, signal: AbortSignal): Promise<string[]> {
+export async function listModels(
+  endpoint: string,
+  override: string,
+  apiKey: string,
+  api: ApiKind,
+  signal: AbortSignal,
+  relayMode = false,
+): Promise<string[]> {
   const url = modelsUrl(endpoint, override);
   const headers = authHeaders(api, apiKey);
-  const relay = import.meta.env.DEV && isLocalUrl(url);
-  const response = await fetch(relay ? "/probe" : url, {
+  const relay = import.meta.env.DEV || relayMode;
+  const response = await fetch(relay ? (import.meta.env.DEV ? "/probe" : "/api/relay") : url, {
     method: relay ? "POST" : "GET",
     headers: relay ? { "content-type": "application/json" } : headers,
     body: relay ? JSON.stringify({ url, method: "GET", headers }) : undefined,
@@ -322,11 +438,4 @@ export function httpError(status: number, body: string): string {
   if (status === 401 || status === 403) return `密钥被拒绝（${status}）${snippet ? `：${snippet}` : ""}`;
   if (status === 404) return "这个地址返回 404。请填完整路径，不要只填到 /v1";
   return `接口返回 ${status}${snippet ? `：${snippet}` : ""}`;
-}
-
-function corsHint(message: string): string {
-  if (/failed to fetch|networkerror|load failed/i.test(message)) {
-    return "浏览器直接请求本地网关失败了。请确认网关已启用 CORS，允许当前页面跨域访问；请求不会经过 Cloudflare。";
-  }
-  return message;
 }

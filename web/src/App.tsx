@@ -1,6 +1,6 @@
 import { useEffect, useRef, useState } from "react";
 import { loadKernel, type Kernel, type Report, type Summary } from "./kernel";
-import { listModels, probeOnce, type ApiKind, type ProbePhase, type ProbeRequest } from "./probe";
+import { listModels, probeOnce, probeReachability, NetworkFailure, type ApiKind, type ProbePhase, type ProbeRequest, type Reachability } from "./probe";
 import { formatCount, formatMs, formatSpeed } from "./format";
 import { cardPng, download, filename, toCsv, toJson, type ExportMeta } from "./export";
 import { CardDialog, type CardState } from "./CardDialog";
@@ -44,6 +44,9 @@ export function App() {
   const [adaptations, setAdaptations] = useState<string[]>([]);
   const [exportNote, setExportNote] = useState<string | null>(null);
   const [card, setCard] = useState<CardState | null>(null);
+  const [reach, setReach] = useState<Reachability | null>(null);
+  const [checking, setChecking] = useState(false);
+  const [viaRelay, setViaRelay] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const [revealed, setRevealed] = useState(false);
   const modelsRequest = useRef<AbortController | null>(null);
@@ -122,6 +125,7 @@ export function App() {
       prompt,
       maxTokens: tokens,
       temperature: 0,
+      relay: viaRelay,
       onPhase: setPhase,
     };
     const reports: Report[] = [];
@@ -148,7 +152,15 @@ export function App() {
       if (abort.signal.aborted) {
         setError(timedOut ? `超过 ${seconds} 秒还没结束，已经停下。` : "已取消。");
       } else {
-        setError(err instanceof Error ? err.message : "测速失败");
+        const message = err instanceof Error ? err.message : "测速失败";
+        // On a transport failure, one cheap HEAD tells the person whether the
+        // host answers at all: if it does, the blocker is CORS, not the network.
+        if (err instanceof NetworkFailure) {
+          const probe = await probeReachability(api, endpoint, new AbortController().signal).catch(() => null);
+          setError(probe?.ok ? `${message} ${probe.detail}` : message);
+        } else {
+          setError(message);
+        }
       }
     } finally {
       window.clearTimeout(timer);
@@ -179,6 +191,22 @@ export function App() {
     if (!summary || !summaryMeta) return;
     download(new Blob([toCsv(summary, summaryMeta)], { type: "text/csv;charset=utf-8" }), filename(summaryMeta, "csv"));
     setExportNote("CSV 已保存");
+  }
+
+  async function checkReach() {
+    if (!endpoint.trim()) {
+      setError("先填写接口地址");
+      return;
+    }
+    setChecking(true);
+    setReach(null);
+    try {
+      setReach(await probeReachability(api, endpoint, new AbortController().signal, viaRelay));
+    } catch (err) {
+      setReach({ ok: false, detail: err instanceof Error ? err.message : "检查失败" });
+    } finally {
+      setChecking(false);
+    }
   }
 
   async function saveCard() {
@@ -220,7 +248,7 @@ export function App() {
     const controller = new AbortController();
     modelsRequest.current = controller;
     setModelsLoading(true);
-    listModels(endpoint, modelsUrl, apiKey, api, controller.signal)
+    listModels(endpoint, modelsUrl, apiKey, api, controller.signal, viaRelay)
       .then((ids) => {
         if (controller.signal.aborted) return;
         setModels(ids);
@@ -392,6 +420,13 @@ export function App() {
               />
             </label>
           </div>
+          <label className="toggle">
+            <input type="checkbox" checked={viaRelay} onChange={(event) => setViaRelay(event.target.checked)} />
+            <span>
+              通过非持久化 worker 中转请求以绕过 CORS 限制
+              <em>请求经 Cloudflare Worker 转发一次，不保存、不记录；密钥会离开这台电脑。</em>
+            </span>
+          </label>
           <details className="advanced">
             <summary>高级设置</summary>
             <div className="adv-grid">
@@ -413,6 +448,12 @@ export function App() {
                   onChange={(event) => setTimeoutText(event.target.value)}
                 />
               </label>
+            </div>
+            <div className="reach">
+              <button type="button" onClick={() => void checkReach()} disabled={checking || !endpoint.trim()}>
+                {checking ? "正在检查…" : "检查接口连通性"}
+              </button>
+              {reach && <p className={reach.ok ? "reach-ok" : "reach-bad"}>{reach.detail}</p>}
             </div>
           </details>
           <label className="field">

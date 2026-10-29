@@ -177,6 +177,36 @@ dd { margin: 2px 0 0; font-variant-numeric: tabular-nums; }
 .advanced summary { cursor: pointer; color: var(--quiet); }
 .advanced .field { margin-top: 10px; }
 .adv-grid { display: grid; grid-template-columns: minmax(0, 1.6fr) minmax(0, 0.6fr); gap: 10px; }
+.toggle {
+  display: flex;
+  gap: 9px;
+  align-items: flex-start;
+  margin: 2px 0 12px;
+  font-size: 13px;
+  cursor: pointer;
+}
+.toggle input { width: auto; margin: 2px 0 0; accent-color: var(--ink); }
+.toggle em {
+  display: block;
+  margin-top: 2px;
+  color: var(--quiet);
+  font-style: normal;
+  line-height: 1.45;
+}
+.reach { display: grid; gap: 8px; }
+.reach button {
+  justify-self: start;
+  padding: 7px 11px;
+  border: 1px solid var(--rule);
+  border-radius: 8px;
+  background: white;
+  font-size: 13px;
+  cursor: pointer;
+}
+.reach button:disabled { opacity: 0.45; cursor: not-allowed; }
+.reach p { margin: 0; font-size: 13px; line-height: 1.5; }
+.reach-ok { color: var(--quiet); }
+.reach-bad { color: var(--fail); }
 .exports { display: flex; flex-wrap: wrap; align-items: center; gap: 8px; margin-top: 18px; }
 .exports button {
   padding: 7px 11px;

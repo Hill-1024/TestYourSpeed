@@ -37,8 +37,10 @@ async function relay(req: IncomingMessage, res: ServerResponse) {
     res.writeHead(400).end("目标地址无效");
     return;
   }
-  if (!["http:", "https:"].includes(target.protocol) || !isLocal(target.hostname)) {
-    res.writeHead(403).end("开发转发只允许本机地址");
+  // The relay itself only listens on 127.0.0.1, so widening the target does
+  // not expose it. It also rescues endpoints that never answer preflight.
+  if (!["http:", "https:"].includes(target.protocol)) {
+    res.writeHead(403).end("只支持 http 或 https 目标");
     return;
   }
   const method = parsed.method === "GET" ? "GET" : "POST";
